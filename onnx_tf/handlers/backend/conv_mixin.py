@@ -6,6 +6,26 @@ from onnx_tf.common import supports_device
 from .broadcast_mixin import BroadcastMixin
 from .pad_mixin import PadMixin
 
+def _get_sequence(value, n, channel_index, name):
+  """Formats a value input for gen_nn_ops."""
+  if value is None:
+    value = [1]
+  # TODO improve here
+  current_n = len(value)
+  if current_n == n + 2:
+    return value
+  elif current_n == 1:
+    value = list((value[0],) * n)
+  elif current_n == n:
+    value = list(value)
+  else:
+    raise ValueError("{} should be of length 1, {} or {} but was {}".format(
+        name, n, n + 2, current_n))
+
+  if channel_index == 1:
+    return [1, 1] + value
+  else:
+    return [1] + value + [1]
 
 class ConvMixin(BroadcastMixin):
 
@@ -139,16 +159,29 @@ class ConvMixin(BroadcastMixin):
 
         convolved.append(conv_rs)
     else:
-      convolved = [
-          tf.nn.convolution(
-              x,
-              weight,
-              "VALID",
-              strides=strides,
-              dilation_rate=dilations,
-              data_format=compute_format)
-          for (x, weight) in zip(xs, weight_groups)
-      ]
+      if group != weights.shape[-1]:
+        convolved = [
+            tf.nn.convolution(
+                x,
+                weight,
+                "VALID",
+                strides=strides,
+                dilation_rate=dilations,
+                data_format=compute_format)
+            for (x, weight) in zip(xs, weight_groups)
+        ]
+      else:
+        # convert to depthwise convolutions if num group==channels
+        convolved = [
+          tf.nn.depthwise_conv2d(
+               x,
+               tf.transpose(weights, [0, 1, 3, 2]),  # [filter_height, filter_width, in_channels, multiplier (=1)]
+               strides=_get_sequence(strides, 2, channel_index=3, name="strides"),  # requires a 4-d list
+               padding="VALID",
+               rate=dilations, # NOTE I'm not sure if it's a correct. In the newer tensorflow versions there is dilations parameter.
+               data_format=compute_format,
+           )
+        ]
 
     if len(node.inputs) == 2:
       if support_cuda:
